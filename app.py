@@ -3,105 +3,120 @@ import requests
 import json
 import threading
 from byte import Encrypt_ID, encrypt_api
+import like_count_pb2
+import gzip
+from io import BytesIO
 
 app = Flask(__name__)
 
-API_KEY = "zoro"
-
 def load_tokens(region):
     try:
-        region = region.upper()
-        if region == "IND":
-            file_path = "spam_ind.json"
-        elif region in {"BR", "US", "SAC", "NA"}:
-            file_path = "spam_br.json"
-        elif region == "EU":
-            file_path = "spam_eu.json"
-        elif region == "VN":
-            file_path = "spam_vn.json"
-        else:
-            file_path = "spam_bd.json"
-
-        with open(file_path, "r") as f:
+        if region.upper() != "IND":
+            return None
+        with open("token_ind.json", "r") as f:
             data = json.load(f)
-            tokens = [item["token"] for item in data]
-        return tokens
-
+            return [item["token"] for item in data]
     except Exception as e:
-        app.logger.error(f"Error loading tokens for region {region}: {e}")
+        app.logger.error(f"Error loading tokens: {e}")
         return None
 
 def get_request_url(region):
-    region = region.upper()
-    if region == "IND":
-        return "https://client.ind.freefiremobile.com/RequestAddingFriend"
-    elif region in {"BR", "US", "SAC", "NA"}:
-        return "https://client.us.freefiremobile.com/RequestAddingFriend"
-    else:
-        return "https://clientbp.ggblueshark.com/RequestAddingFriend"
+    return "https://client.ind.freefiremobile.com/RequestAddingFriend"
 
+def get_nickname(uid, token):
+    try:
+        encrypted_id = Encrypt_ID(uid)
+        payload = f"08a7c4839f1e10{encrypted_id}1801"
+        encrypted_payload = encrypt_api(payload)
 
-def send_friend_request(uid, token, region, results):
-    encrypted_id = Encrypt_ID(uid)
-    payload = f"08a7c4839f1e10{encrypted_id}1801"
-    encrypted_payload = encrypt_api(payload)
-    url = get_request_url(region)
+        url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "Dalvik/2.1.0 (Linux; Android 9)",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": "16",
+            "Host": "client.ind.freefiremobile.com",
+            "Connection": "close",
+            "Accept-Encoding": "gzip"
+        }
 
-    headers = {
-        "Expect": "100-continue",
-        "Authorization": f"Bearer {token}",
-        "X-Unity-Version": "2018.4.11f1",
-        "X-GA": "v1 1",
-        "ReleaseVersion": "OB49",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Content-Length": "16",
-        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-N975F Build/PI)",
-        "Host": "clientbp.ggblueshark.com",
-        "Connection": "close",
-        "Accept-Encoding": "gzip, deflate, br"
-    }
+        response = requests.post(url, headers=headers, data=bytes.fromhex(encrypted_payload))
 
-    response = requests.post(url, headers=headers, data=bytes.fromhex(encrypted_payload))
+        if response.status_code == 200:
+            try:
+                decompressed = gzip.decompress(response.content)
+                info = like_count_pb2.Info()
+                info.ParseFromString(decompressed)
+                return info.AccountInfo.PlayerNickname
+            except Exception as e:
+                print(f"[ERROR] Decompression or parsing failed: {e}")
+                return None
+        else:
+            print(f"[ERROR] Nickname request failed with status {response.status_code}")
+    except Exception as e:
+        print(f"[ERROR] Nickname fetch failed: {e}")
+    return None
 
-    if response.status_code == 200:
-        results["success"] += 1
-    else:
+def send_friend_request(uid, token, results):
+    try:
+        encrypted_id = Encrypt_ID(uid)
+        payload = f"08a7c4839f1e10{encrypted_id}1801"
+        encrypted_payload = encrypt_api(payload)
+        url = get_request_url("IND")
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Unity-Version": "2018.4.11f1",
+            "X-GA": "v1 1",
+            "ReleaseVersion": "OB49",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": "16",
+            "User-Agent": "Dalvik/2.1.0 (Linux; Android 9)",
+            "Host": "client.ind.freefiremobile.com",
+            "Connection": "close",
+            "Accept-Encoding": "gzip"
+        }
+
+        response = requests.post(url, headers=headers, data=bytes.fromhex(encrypted_payload))
+        if response.status_code == 200:
+            results["success"] += 1
+        else:
+            results["failed"] += 1
+    except:
         results["failed"] += 1
 
 @app.route("/send_requests", methods=["GET"])
 def send_requests():
     uid = request.args.get("uid")
     region = request.args.get("region")
-    api_key = request.args.get("key")
 
-    if not api_key or api_key != API_KEY:
-        return jsonify({"error": "Invalid or missing API key"}), 403
-
-    if not uid or not region:
-        return jsonify({"error": "uid and region parameters are required"}), 400
+    if not uid or region.upper() != "IND":
+        return jsonify({"error": "Only IND region is supported"}), 400
 
     tokens = load_tokens(region)
     if not tokens:
-        return jsonify({"error": f"No tokens found for region {region}"}), 500
+        return jsonify({"error": "No tokens found"}), 500
 
     results = {"success": 0, "failed": 0}
     threads = []
 
-    for token in tokens[:110]:  # Maximum 110 requests
-        thread = threading.Thread(target=send_friend_request, args=(uid, token, region, results))
-        threads.append(thread)
-        thread.start()
+    for token in tokens[:110]:
+        t = threading.Thread(target=send_friend_request, args=(uid, token, results))
+        threads.append(t)
+        t.start()
 
-    for thread in threads:
-        thread.join()
+    for t in threads:
+        t.join()
 
-    total_requests = results["success"] + results["failed"]
-    status = 1 if results["success"] != 0 else 2
+    nickname = get_nickname(uid, tokens[0])
 
     return jsonify({
-        "success_count": results["success"],
-        "failed_count": results["failed"],
-        "status": status
+        "UID": uid,
+        "Region": "IND",
+        "Totalspam": results["success"] + results["failed"],
+        "Successfulspam": results["success"],
+        "Failedspam": results["failed"],
+       
     })
 
 if __name__ == "__main__":
